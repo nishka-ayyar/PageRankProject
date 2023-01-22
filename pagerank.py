@@ -10,6 +10,9 @@ import csv
 
 import logging
 
+import gensim.downloader
+vectors = gensim.downloader.load('glove-twitter-200')
+
 
 class WebGraph():
 
@@ -182,6 +185,19 @@ class WebGraph():
             if url_satisfies_query(url,query):
                 logging.info(f'rank={matches} pagerank={pagerank:0.4e} url={url}')
                 matches += 1
+
+                
+def is_similar(term, add_score = False):
+    similar_vec = vectors.most_similar(term)[:5]
+
+    similar = []
+    if not add_score:
+        for i in similar_vec:
+            similar.append(i[0])
+    else:
+        return similar_vec
+
+    return similar
 
 
 def url_satisfies_query(url, query):
