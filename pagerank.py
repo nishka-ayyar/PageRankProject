@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 '''
 This file calculates pagerank vectors for small-scale webgraphs.
 See the README.md for example usage.
@@ -7,12 +9,12 @@ import math
 import torch
 import gzip
 import csv
+import numpy as np
 
 import logging
-
 import gensim.downloader
-vectors = gensim.downloader.load('glove-twitter-200')
 
+vectors = gensim.downloader.load('glove-twitter-50')
 
 class WebGraph():
 
@@ -100,17 +102,33 @@ class WebGraph():
         '''
         n = self.P.shape[0]
 
+        print("n=", n)
+
         if query is None:
             v = torch.ones(n)
 
         else:
             v = torch.zeros(n)
             # FIXME: implement Task 2
-            for i in range(n):
+
+
+            '''
+            for each index in the personalization vector:
+                 get the url for the index (see the _url_to_index function)
+                 check if the url satisfies the input query (see the url_satisfies_query function)
+                 if so, set the corresponding index to one
+            normalize the vector
+            '''
+            print("v=", v)
+
+            for i in range(0, n):
                 url = self._index_to_url(i)
-                if url_satisfies_query(url, query) == True:
+                #print("url=", url)
+                # print("url=", url)
+                if url_satisfies_query(url, query):
+                    # setting the corresponding index to one
                     v[i] = 1
-        
+
         v_sum = torch.sum(v)
         assert(v_sum>0)
         v /= v_sum
@@ -121,11 +139,19 @@ class WebGraph():
     def power_method(self, v=None, x0=None, alpha=0.85, max_iterations=1000, epsilon=1e-6):
         '''
         This function implements the power method for computing the pagerank.
+
         The self.P variable stores the $P$ matrix.
         You will have to compute the $a$ vector and implement Equation 5.1 from "Deeper Inside Pagerank."
         '''
         with torch.no_grad():
             n = self.P.shape[0]
+
+            non_dangling = torch.sparse.sum(self.P,1).indices()
+            a = torch.ones([n,1])
+            a[non_dangling]= 0
+
+            
+            # print("a=", a.shape)
 
             # create variables if none given
             if v is None:
@@ -138,13 +164,13 @@ class WebGraph():
                 x0 = torch.unsqueeze(x0,1)
             x0 /= torch.norm(x0)
             
-            #compute 'a' vector
-            a = torch.ones([n, 1])
-            nondangle = torch.sparse.sum(self.P, 1).indices()
-            a[nondangle] = 0
-
             # main loop
-            xprev = x0
+            xprev = x0 #when k = 0
+            
+            # print('xprev.shape=',xprev.shape)
+            # print('self.P=',self.P.shape)
+
+            #shape is most important thing to know about a tensor
             x = xprev.detach().clone()
             for i in range(max_iterations):
                 xprev = x.detach().clone()
@@ -154,7 +180,19 @@ class WebGraph():
                 # HINT: this can be done with a single call to the `torch.sparse.addmm` function,
                 # but you'll have to read the code above to figure out what variables should get passed to that function
                 # and what pre/post processing needs to be done to them
-
+                
+                # mat (Tensor) – a dense matrix to be added\
+                #mat1 (Tensor) – a sparse matrix to be multiplied
+                #mat2 (Tensor) – a dense matrix to be multiplied
+                
+                add = (alpha * x.t()@a+(1-alpha))*v.t()
+                x = torch.sparse.addmm(
+                         add.t(), 
+                         self.P.t(),
+                         x,
+                         beta = 1,
+                         alpha = alpha)
+                x /= torch.norm(x)
                 # output debug information
                 residual = torch.norm(x-xprev)
                 logging.debug(f'i={i} residual={residual}')
@@ -167,37 +205,69 @@ class WebGraph():
             return x.squeeze()
 
 
-    def search(self, pi, query='', max_results=10):
+    def search(self, pi, query='', max_results=10, p = 45):
         '''
         Logs all urls that match the query.
         Results are displayed in sorted order according to the pagerank vector pi.
         '''
+        # task 2
+
         n = self.P.shape[0]
         vals,indices = torch.topk(pi,n)
+        
+        
+        urls = [self._index_to_url(index.item()) for index in indices]
+        page = [val.item() for val in vals]
+        
+        scores = []
+        words = []
+
+        terms = query.split()
+        for term in terms:
+            if term[0] != '-':
+                words += similar_words(term, add_score = True)
+
+        if query == '':
+            scores = page
+        else:
+            for i, url in enumerate(urls):
+                score = 0
+                for word_vector in words:
+                    word = word_vector[0]
+                    word_score = word_vector[1]
+                    new_n = url.count(word)
+                    score += new_n*(word_score**p)
+
+
+                ranking = page[i] * score
+                scores.append(ranking)
+
+        url_score = list(zip(urls, scores))
+        url_score.sort(key = lambda x: x[1], reverse = True)
 
         matches = 0
         for i in range(n):
             if matches >= max_results:
                 break
-            index = indices[i].item()
-            url = self._index_to_url(index)
-            pagerank = vals[i].item()
+            url = url_score[i][0]
             if url_satisfies_query(url,query):
-                logging.info(f'rank={matches} pagerank={pagerank:0.4e} url={url}')
+                ranking = url_score[i][1]
+                logging.info(f'rank = {matches} ranking = {ranking:0.4e} url= {url}')
                 matches += 1
 
-                
-def is_similar(term, add_score = False):
-    similar_vec = vectors.most_similar(term)[:5]
+
+def similar_words(term, add_score = False):
+    similar_words_v = vectors.most_similar(term)[:5]
 
     similar = []
     if not add_score:
-        for i in similar_vec:
+        for i in similar_words_v:
             similar.append(i[0])
     else:
-        return similar_vec
-
+        return similar_words_v
+    
     return similar
+
 
 
 def url_satisfies_query(url, query):
@@ -207,6 +277,7 @@ def url_satisfies_query(url, query):
     But, if a word is preceded by the negation sign `-`,
     then the function returns False if that word is present in the url,
     even if it would otherwise return True.
+
     >>> url_satisfies_query('www.lawfareblog.com/covid-19-speech', 'covid')
     True
     >>> url_satisfies_query('www.lawfareblog.com/covid-19-speech', 'coronavirus covid')
@@ -226,13 +297,17 @@ def url_satisfies_query(url, query):
     '''
     satisfies = False
     terms = query.split()
-
     num_terms=0
     for term in terms:
         if term[0] != '-':
             num_terms+=1
+            similar_terms = similar_words(term)
             if term in url:
                 satisfies = True
+            for similar_term in similar_terms:
+                if similar_term in url:
+                    satisfies = True
+    
     if num_terms==0:
         satisfies=True
 
